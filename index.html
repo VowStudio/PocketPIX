@@ -176,6 +176,16 @@ header .spacer{flex:1}
 #out{display:block;max-width:100%;max-height:44vh;image-rendering:pixelated;-webkit-touch-callout:default;-webkit-user-select:auto;user-select:auto;
   background:repeating-conic-gradient(var(--check-a) 0 25%,var(--check-b) 0 50%) 0 0/16px 16px;border-radius:6px}
 .dim{text-align:center;font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums;margin:0}
+.presets .btn{flex:0 1 auto;font-variant-numeric:tabular-nums}
+.sizerow{display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap}
+.dimfield{display:flex;flex-direction:column;gap:5px;font-size:12px;font-weight:700;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.dimfield .stepper{background:var(--bg)}
+.dimfield input{width:58px;min-height:42px;border:0;background:transparent;color:var(--fg);font:inherit;font-size:17px;font-weight:700;text-align:center;font-variant-numeric:tabular-nums;-webkit-user-select:text;user-select:text}
+.dimfield input:focus{outline:2px solid var(--accent);outline-offset:-2px;border-radius:4px}
+.dimfield input[aria-invalid="true"]{color:#ff8a80}
+.linkbtn{width:44px;height:44px;border-radius:10px;border:1px solid var(--line);background:var(--panel);cursor:pointer;display:grid;place-items:center;padding:0;color:var(--muted)}
+.linkbtn svg{width:22px;height:22px;pointer-events:none}
+.linkbtn[aria-pressed="true"]{color:var(--on-accent);background:var(--accent);border-color:var(--accent)}
 .filebtn{position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden}
 .filebtn input{position:absolute;inset:0;opacity:0;cursor:pointer}
 .textin{min-height:48px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit;font-size:17px;padding:0 14px;-webkit-user-select:text;user-select:text}
@@ -274,10 +284,28 @@ header .spacer{flex:1}
 <div class="overlay" id="newDlg" hidden>
   <div class="sheet" role="dialog" aria-labelledby="newT">
     <h2 id="newT">New canvas</h2>
-    <p class="hint">Pick a size to start a blank one-frame canvas, or open a project you saved earlier. Undo brings your current animation back.</p>
-    <div class="choices" id="sizes">
-      <button class="btn" data-n="16">16</button><button class="btn" data-n="24">24</button><button class="btn" data-n="32">32</button><button class="btn" data-n="48">48</button><button class="btn" data-n="64">64</button><button class="btn" data-n="96">96</button><button class="btn" data-n="128">128</button>
+    <p class="hint">Pick a preset or type your own size, then create a blank one-frame canvas. Undo brings your current animation back.</p>
+    <h3>Square</h3>
+    <div class="choices presets" id="sizes">
+      <button class="btn" data-w="16" data-h="16">16</button><button class="btn" data-w="24" data-h="24">24</button><button class="btn" data-w="32" data-h="32">32</button><button class="btn" data-w="48" data-h="48">48</button><button class="btn" data-w="64" data-h="64">64</button><button class="btn" data-w="96" data-h="96">96</button><button class="btn" data-w="128" data-h="128">128</button>
     </div>
+    <h3>Wide</h3>
+    <div class="choices presets">
+      <button class="btn" data-w="32" data-h="16">32 × 16</button><button class="btn" data-w="64" data-h="32">64 × 32</button><button class="btn" data-w="128" data-h="64">128 × 64</button><button class="btn" data-w="160" data-h="144">160 × 144</button><button class="btn" data-w="256" data-h="224">256 × 224</button>
+    </div>
+    <h3 id="customT">Custom</h3>
+    <div class="sizerow" role="group" aria-labelledby="customT">
+      <label class="dimfield"><span>Width</span>
+        <span class="stepper"><button type="button" data-step="w" data-d="-1" aria-label="Narrower">−</button><input id="newW" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="3" aria-label="Width in pixels"><button type="button" data-step="w" data-d="1" aria-label="Wider">+</button></span>
+      </label>
+      <button type="button" class="linkbtn" id="linkWH" aria-pressed="true" title="Keep width and height the same" aria-label="Keep width and height the same"></button>
+      <label class="dimfield"><span>Height</span>
+        <span class="stepper"><button type="button" data-step="h" data-d="-1" aria-label="Shorter">−</button><input id="newH" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="3" aria-label="Height in pixels"><button type="button" data-step="h" data-d="1" aria-label="Taller">+</button></span>
+      </label>
+      <button type="button" class="chip icon" id="swapWH" title="Swap width and height" aria-label="Swap width and height"></button>
+    </div>
+    <p class="hint" id="sizeHint">Any size from 1 to 256 pixels on each side.</p>
+    <button class="btn primary" id="createBtn">Create canvas</button>
     <label class="btn filebtn">Open a project file<input type="file" id="openFile" accept=".json,.pixel,application/json"></label>
     <button class="btn" data-close>Keep drawing</button>
   </div>
@@ -440,6 +468,9 @@ function encodeGIF(w, h, palette, frames, delays) {
     down:`<path d="M6 10l6 6 6-6"/>`,
     merge:`<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>`,
     rename:`<path d="M4 20h4L19 9l-4-4L4 16z"/>`,
+    link:`<path d="M10 14a4.5 4.5 0 0 0 6.4 0l3-3a4.5 4.5 0 0 0-6.4-6.4l-1 1"/><path d="M14 10a4.5 4.5 0 0 0-6.4 0l-3 3a4.5 4.5 0 0 0 6.4 6.4l1-1"/>`,
+    unlink:`<path d="M10 14a4.5 4.5 0 0 0 6.4 0l3-3a4.5 4.5 0 0 0-6.4-6.4l-1 1" opacity=".55"/><path d="M14 10a4.5 4.5 0 0 0-6.4 0l-3 3a4.5 4.5 0 0 0 6.4 6.4l1-1" opacity=".55"/><path d="M4 4l16 16"/>`,
+    swapWH:`<path d="M7 4v16M7 20l-3-3M7 20l3-3"/><path d="M17 20V4M17 4l-3 3M17 4l3 3"/>`,
   };
   const svg = k => '<svg viewBox="0 0 24 24" aria-hidden="true">' + ICON[k] + '</svg>';
 
@@ -1682,7 +1713,62 @@ function encodeGIF(w, h, palette, frames, delays) {
   document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => closeDlg(b.closest('.overlay')));
   DIALOGS.forEach(d => d.addEventListener('click', e => { if (e.target === d) closeDlg(d); }));
   const anyDlg = () => DIALOGS.some(d => !d.hidden);
-  $('#newBtn').onclick = () => { stopPlay(); settle(); newDlg.hidden = false; };
+  // ---------- new canvas: presets and custom size share one width/height ----------
+  const MAXD = 256, newW = $('#newW'), newH = $('#newH'), linkBtn = $('#linkWH');
+  let linked = true;
+  $('#swapWH').innerHTML = svg('swapWH');
+  const readDim = inp => { const v = parseInt(inp.value, 10); return v >= 1 && v <= MAXD ? v : null; };
+  function syncNew() {
+    const w = readDim(newW), h = readDim(newH);
+    newW.setAttribute('aria-invalid', !w); newH.setAttribute('aria-invalid', !h);
+    if (linkBtn.getAttribute('aria-pressed') !== String(linked) || !linkBtn.firstChild) { linkBtn.setAttribute('aria-pressed', linked); linkBtn.innerHTML = svg(linked ? 'link' : 'unlink'); }
+    let match = null;
+    document.querySelectorAll('#newDlg [data-w]').forEach(b => {
+      const on = +b.dataset.w === w && +b.dataset.h === h;
+      b.classList.toggle('sel', on); if (on) match = b;
+    });
+    $('#customT').textContent = match || !w || !h ? 'Custom' : 'Custom · ' + w + ' × ' + h;
+    const ok = !!(w && h);
+    $('#createBtn').disabled = !ok;
+    $('#createBtn').textContent = ok ? 'Create ' + w + ' × ' + h + ' canvas' : 'Create canvas';
+    $('#sizeHint').textContent = ok
+      ? (w * h > 128 * 128 ? 'Large canvases can feel slower on older iPads.' : 'Any size from 1 to 256 pixels on each side.')
+      : 'Enter a whole number from 1 to 256 for each side.';
+  }
+  function setDims(w, h) { newW.value = w; newH.value = h; syncNew(); }
+  document.querySelectorAll('#newDlg [data-w]').forEach(b => b.onclick = () => {
+    const w = +b.dataset.w, h = +b.dataset.h;
+    linked = w === h; setDims(w, h);
+  });
+  linkBtn.onclick = () => {
+    linked = !linked;
+    if (linked) { const w = readDim(newW) || readDim(newH) || 32; setDims(w, w); } else syncNew();
+  };
+  $('#swapWH').onclick = () => setDims(newH.value, newW.value);
+  [[newW, newH], [newH, newW]].forEach(([a, b]) => {
+    a.addEventListener('input', () => {
+      a.value = a.value.replace(/[^0-9]/g, '').slice(0, 3);
+      if (linked && a.value) b.value = a.value;
+      syncNew();
+    });
+    a.addEventListener('blur', () => { if (a.value) { a.value = clamp(+a.value, 1, MAXD); if (linked) b.value = a.value; syncNew(); } });
+    a.addEventListener('keydown', e => { if (e.key === 'Enter') { a.blur(); $('#createBtn').click(); } });
+  });
+  document.querySelectorAll('#newDlg [data-step]').forEach(b => b.onclick = () => {
+    const a = b.dataset.step === 'w' ? newW : newH, other = a === newW ? newH : newW;
+    const v = clamp((readDim(a) || 0) + +b.dataset.d, 1, MAXD);
+    a.value = v; if (linked) other.value = v; syncNew();
+  });
+  $('#createBtn').onclick = () => {
+    const w = readDim(newW), h = readDim(newH); if (!w || !h) return;
+    record(); newDlg.hidden = true; resetDoc(w, h, [[blank(w, h)]], [1]);
+    toast('New ' + w + ' × ' + h + ' canvas · undo to go back');
+  };
+  $('#newBtn').onclick = () => {
+    stopPlay(); settle();
+    linked = W === H; setDims(W, H);
+    newDlg.hidden = false;
+  };
   function resetDoc(w, h, fr, hl, newFps) {
     W = w; H = h; frames = fr; holds = hl; cur = 0; layer = 0;
     layers = fr[0].map((_, i) => newLayer(i + 1));
@@ -1690,9 +1776,6 @@ function encodeGIF(w, h, palette, frames, delays) {
     sel = null; floating = null; pending = null; syncPx();
     view.fit = true; renderTimeline(); renderLayers(); updTimelineCtrls(); resize(); save();
   }
-  document.querySelectorAll('#sizes [data-n]').forEach(b => b.onclick = () => {
-    const n = +b.dataset.n; record(); newDlg.hidden = true; resetDoc(n, n, [[blank(n, n)]], [1]);
-  });
   $('#openFile').addEventListener('change', e => {
     const f = e.target.files && e.target.files[0]; e.target.value = '';
     if (!f) return;
@@ -1904,7 +1987,7 @@ function encodeGIF(w, h, palette, frames, delays) {
   document.querySelectorAll('#formats [data-f]').forEach(b => b.onclick = () => { expFmt = b.dataset.f; makeExport(); });
   $('#exportBtn').onclick = () => {
     stopPlay(); settle();
-    if (W * expScale > 2048) expScale = [16, 8, 4, 1].find(s => W * s <= 2048) || 1;
+    if (Math.max(W, H) * expScale > 2048) expScale = [16, 8, 4, 1].find(s => Math.max(W, H) * s <= 2048) || 1;
     if (frames.length < 2 && (expFmt === 'gif' || expFmt === 'sheet')) expFmt = 'frame';
     makeExport(); expDlg.hidden = false;
   };
