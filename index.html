@@ -409,6 +409,7 @@ function encodeGIF(w, h, palette, frames, delays) {
     ellipse:`<ellipse cx="12" cy="12" rx="8.5" ry="6.5"/>`,
     ellipseFill:`<ellipse cx="12" cy="12" rx="8.5" ry="6.5" fill="currentColor"/>`,
     polygon:`<path d="M5 18L7 5l7 3 5-3-1.5 13z" fill="currentColor" fill-opacity=".35"/>`,
+    spiral:`<path d="M12 12c0-1 1.6-1.2 2.2-.2.9 1.4-.4 3.2-2.2 3.2-2.4 0-3.8-2.6-2.8-4.8 1.3-2.8 5-3.5 7.2-1.6 2.8 2.3 2.4 6.8-.6 8.6-3.6 2.2-8.4.6-9.8-3.2"/>`,
     contour:`<path d="M6 8c3-4 10-3 12 1s-1 10-6 9-9-6-6-10z" fill="currentColor" fill-opacity=".35"/>`,
     text:`<path d="M5 7V4.5h14V7"/><path d="M12 4.5v15"/><path d="M9 19.5h6"/>`,
     blur:`<circle cx="12" cy="12" r="8" stroke-dasharray="2 2.4"/><circle cx="12" cy="12" r="3.5"/>`,
@@ -463,6 +464,7 @@ function encodeGIF(w, h, palette, frames, delays) {
     ellipseFill:{name:'Filled ellipse', short:'Ellipse'},
     polygon:{name:'Polygon', short:'Polygon'},
     contour:{name:'Contour', short:'Contour'},
+    spiral:{name:'Spiral', short:'Spiral'},
     text:{name:'Text', short:'Text', key:'t'},
     blur:{name:'Blur', short:'Blur', key:'r'},
     jumble:{name:'Jumble', short:'Jumble'},
@@ -476,7 +478,7 @@ function encodeGIF(w, h, palette, frames, delays) {
     {id:'erase', tools:['eraser']},
     {id:'fill', tools:['bucket','gradient']},
     {id:'line', tools:['line','curve']},
-    {id:'shape', tools:['rect','rectFill','ellipse','ellipseFill','polygon','contour']},
+    {id:'shape', tools:['rect','rectFill','ellipse','ellipseFill','polygon','contour','spiral']},
     {id:'text', tools:['text']},
     {id:'fx', tools:['blur','jumble']},
     {id:'pick', tools:['picker']},
@@ -485,9 +487,9 @@ function encodeGIF(w, h, palette, frames, delays) {
   const groupOf = {}; GROUPS.forEach(g => g.tools.forEach(t => groupOf[t] = g.id));
   const groupSel = {}; GROUPS.forEach(g => groupSel[g.id] = g.tools[0]);
   const SELECT_TOOLS = ['marquee','ellipseSel','lasso','polyLasso','wand'];
-  const BRUSH_TOOLS = ['pencil','eraser','spray','blur','jumble','line','curve','rect','ellipse'];
+  const BRUSH_TOOLS = ['pencil','eraser','spray','blur','jumble','line','curve','rect','ellipse','spiral'];
   const FREE_TOOLS = ['pencil','eraser','spray','blur','jumble'];
-  const DRAG_TOOLS = ['line','rect','rectFill','ellipse','ellipseFill','gradient'];
+  const DRAG_TOOLS = ['line','rect','rectFill','ellipse','ellipseFill','gradient','spiral'];
   const EDIT_TOOLS = [...FREE_TOOLS, ...DRAG_TOOLS, 'bucket', 'curve', 'polygon', 'contour', 'move', 'text'];
 
   const $ = s => document.querySelector(s);
@@ -501,7 +503,7 @@ function encodeGIF(w, h, palette, frames, delays) {
   let layers = [{name: 'Layer 1', visible: true, locked: false}], layer = 0;
   let colors = {main: PAL[4], second: PAL[3]}, slot = 'main', recent = [];
   let tool = 'pencil', prevTool = 'pencil';
-  let brush = {size: 1, shape: 'square'}, pp = true, density = 4, contig = true, gradMode = 'dither', selMode = 'replace';
+  let brush = {size: 1, shape: 'square'}, pp = true, density = 4, contig = true, gradMode = 'dither', selMode = 'replace', spiralTurns = 3, spiralDir = 1;
   let mirrorH = false, mirrorV = false, grid = true;
   let sel = null, floating = null, clip = null, pending = null, compShow = null;
   let undoS = [], redoS = [], stroke = null, hover = null, gesture = null;
@@ -615,12 +617,14 @@ function encodeGIF(w, h, palette, frames, delays) {
       if (typeof p.contig === 'boolean') contig = p.contig;
       if (p.gradMode === 'smooth') gradMode = 'smooth';
       if (typeof p.grid === 'boolean') grid = p.grid;
+      if (p.spiralTurns >= 1 && p.spiralTurns <= 12) spiralTurns = p.spiralTurns | 0;
+      if (p.spiralDir === -1) spiralDir = -1;
       return true;
     } catch (e) { return false; }
   }
   let saveT;
   const saveNow = () => { try { localStorage.setItem(SK, JSON.stringify({...projectData(), onion, colors, recent,
-      prefs: {brush, pp, density, contig, gradMode, grid}})); } catch (e) {} };
+      prefs: {brush, pp, density, contig, gradMode, grid, spiralTurns, spiralDir}})); } catch (e) {} };
   function save() { clearTimeout(saveT); saveT = setTimeout(saveNow, 300); }
 
   // ---------- view ----------
@@ -945,6 +949,22 @@ function encodeGIF(w, h, palette, frames, delays) {
     else if (tool === 'ellipse') ellipseCells(a, b, false, S);
     else if (tool === 'ellipseFill') ellipseCells(a, b, true, P);
     else if (tool === 'gradient') gradientFill(a, b, stroke.before);
+    else if (tool === 'spiral') spiralInto(a, b, S);
+  }
+  // Archimedean spiral from the center (a) out to the drag point (b), so the outer end sits under your finger
+  function spiralInto(a, b, cb) {
+    const dx = b.x - a.x, dy = b.y - a.y, R = Math.hypot(dx, dy);
+    if (R < .5) { cb(a.x, a.y); return; }
+    const end = Math.atan2(dy, dx), T = spiralTurns * Math.PI * 2;
+    const n = Math.max(16, Math.ceil(T * R * 1.5));
+    let last = {x: a.x, y: a.y};
+    cb(last.x, last.y);
+    for (let k = 1; k <= n; k++) {
+      const t = k / n, r = R * t, ang = end - spiralDir * T * (1 - t);
+      const p = {x: Math.round(a.x + Math.cos(ang) * r), y: Math.round(a.y + Math.sin(ang) * r)};
+      if (p.x === last.x && p.y === last.y) continue;
+      plotLine(last, p, (x, y) => { if (x !== last.x || y !== last.y) cb(x, y); }); last = p;
+    }
   }
   function curveInto(a, b, bend) {
     const c = {x: 2 * bend.x - (a.x + b.x) / 2, y: 2 * bend.y - (a.y + b.y) / 2};
@@ -1426,6 +1446,8 @@ function encodeGIF(w, h, palette, frames, delays) {
     if (tool === 'move') o.push(Hn(floating ? 'Drag to place · Drop when done' : 'Drag to move the selection, or the whole layer'));
     if (tool === 'lasso') o.push(Hn('Draw around what you want to select'));
     if (tool === 'contour') o.push(Hn('Draw an outline and it fills in'));
+    if (tool === 'spiral') o.push(L('Turns'), stepper(spiralTurns, 1, 12, v => spiralTurns = v, 'Spiral turns'),
+      seg([[1, 'Clockwise'], [-1, 'Counter']], spiralDir, v => spiralDir = v), Hn('Drag from the center outward'));
     if (tool === 'text') o.push(Hn('Tap the canvas where the text should start'));
     if (tool === 'hand') o.push(Hn('Drag to pan · pinch to zoom'));
     if (tool === 'picker') o.push(Hn('Tap a pixel to pick into the ' + (slot === 'main' ? 'Main' : 'Second') + ' slot'));
