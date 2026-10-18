@@ -638,7 +638,8 @@ function encodeGIF(w, h, palette, frames, delays) {
     else if (Array.isArray(d.px)) fr = [[d.px]];
     if (!fr || !fr.length || !Array.isArray(fr[0])) return false;
     const nl = fr[0].length;
-    if (!nl || fr.some(f => !Array.isArray(f) || f.length !== nl || f.some(c => !Array.isArray(c) || c.length !== d.w * d.h || !c.every(okC)))) return false;
+    const checkPx = !d.packed; // unpack() only emits colors from its validated palette
+    if (!nl || fr.some(f => !Array.isArray(f) || f.length !== nl || f.some(c => !Array.isArray(c) || c.length !== d.w * d.h || (checkPx && !c.every(okC))))) return false;
     W = d.w; H = d.h; frames = fr.map(f => f.map(c => c.map(v => v && v.toLowerCase())));
     layers = Array.isArray(d.layers) && d.layers.length === nl
       ? d.layers.map((L, i) => ({name: String(L && L.name || 'Layer ' + (i + 1)).slice(0, 40), visible: !L || L.visible !== false, locked: !!(L && L.locked)}))
@@ -651,9 +652,8 @@ function encodeGIF(w, h, palette, frames, delays) {
     syncPx(); return true;
   }
   const projectData = () => ({app: 'pocket-pixel', version: 4, w: W, h: H, layers, layer, packed: pack(), holds, cur, fps});
-  function load() {
+  function load(d) {
     try {
-      const d = JSON.parse(localStorage.getItem(SK));
       if (!useProject(d)) return false;
       if (typeof d.onion === 'boolean') onion = d.onion;
       if (d.colors && okC(d.colors.main) && okC(d.colors.second) && d.colors.main && d.colors.second) colors = d.colors;
@@ -672,9 +672,52 @@ function encodeGIF(w, h, palette, frames, delays) {
       return true;
     } catch (e) { return false; }
   }
-  let saveT;
-  const saveNow = () => { try { localStorage.setItem(SK, JSON.stringify({...projectData(), onion, colors, recent,
-      prefs: {brush, pp, density, contig, gradMode, grid, spiralTurns, spiralDir, rotSnap}})); } catch (e) {} };
+  // Projects live in IndexedDB, which has room for long animations. localStorage (about 5 MB on
+  // Safari) was the old home; it is still read once to migrate, and used as a fallback for small
+  // projects if IndexedDB is unavailable.
+  const DB_NAME = 'pocketpixel', DB_STORE = 'kv';
+  let dbP = null;
+  function db() {
+    if (!dbP) dbP = new Promise((ok, bad) => {
+      if (!window.indexedDB) { bad(new Error('no indexedDB')); return; }
+      const rq = indexedDB.open(DB_NAME, 1);
+      rq.onupgradeneeded = () => rq.result.createObjectStore(DB_STORE);
+      rq.onsuccess = () => ok(rq.result);
+      rq.onerror = () => bad(rq.error);
+      rq.onblocked = () => bad(new Error('blocked'));
+    }).catch(e => { dbP = null; throw e; });
+    return dbP;
+  }
+  async function idbGet(k) {
+    const d = await db();
+    return new Promise((ok, bad) => { const rq = d.transaction(DB_STORE).objectStore(DB_STORE).get(k); rq.onsuccess = () => ok(rq.result); rq.onerror = () => bad(rq.error); });
+  }
+  async function idbPut(k, v) {
+    const d = await db();
+    return new Promise((ok, bad) => {
+      const tx = d.transaction(DB_STORE, 'readwrite');
+      tx.objectStore(DB_STORE).put(v, k);
+      tx.oncomplete = () => ok(); tx.onerror = () => bad(tx.error); tx.onabort = () => bad(tx.error);
+    });
+  }
+  async function readSaved() {
+    try { const d = await idbGet(SK); if (d) return d; } catch (e) {}
+    try { const t = localStorage.getItem(SK); if (t) return JSON.parse(t); } catch (e) {}
+    return null;
+  }
+  let saveT, booted = false, saveFailed = false;
+  const saveNow = () => {
+    if (!booted) return; // never overwrite the saved project before it has loaded
+    const data = {...projectData(), onion, colors, recent,
+      prefs: {brush, pp, density, contig, gradMode, grid, spiralTurns, spiralDir, rotSnap}};
+    idbPut(SK, data).then(() => {
+      try { localStorage.removeItem(SK); } catch (e) {} // the old copy is safely migrated
+      if (saveFailed) { saveFailed = false; toast('Saving again'); }
+    }).catch(() => {
+      try { localStorage.setItem(SK, JSON.stringify(data)); return; } catch (e) {}
+      if (!saveFailed) { saveFailed = true; toast("Couldn't save. Your device storage may be full."); }
+    });
+  };
   function save() { clearTimeout(saveT); saveT = setTimeout(saveNow, 300); }
 
   // ---------- view ----------
@@ -2062,7 +2105,8 @@ function encodeGIF(w, h, palette, frames, delays) {
     const gct = fl & 0x80 ? readCT(1 << ((fl & 7) + 1)) : null;
     const canvas = new Int32Array(w * h).fill(-1), frames = [], delays = [];
     let gce = {disp: 0, tr: -1, delay: 0};
-    while (p < b.length && frames.length < 500) {
+    const decodeCap = Math.max(1, Math.floor(DECODE_BUDGET / (w * h)));
+    while (p < b.length && frames.length < decodeCap) {
       const t = u8();
       if (t === 0x3B) break;
       if (t === 0x21) {
@@ -2094,7 +2138,8 @@ function encodeGIF(w, h, palette, frames, delays) {
       gce = {disp: 0, tr: -1, delay: 0};
     }
     if (!frames.length) throw new Error('empty');
-    return {w, h, frames, delays};
+    const decodeCapped = frames.length >= decodeCap && p < b.length && b[p] !== 0x3B;
+    return {w, h, frames, delays, decodeCapped};
   }
   async function decodeImage(file) {
     let bmp;
@@ -2142,6 +2187,12 @@ function encodeGIF(w, h, palette, frames, delays) {
   const toHex = v => { if (v < 0) return null; let s = HEXC.get(v); if (!s) { s = '#' + v.toString(16).padStart(6, '0'); HEXC.set(v, s); } return s; };
   const isEmpty = f => { for (let i = 0; i < f.length; i++) if (f[i] >= 0) return false; return true; };
 
+  // Frame limits scale with canvas size instead of a flat count. Each pixel of each frame and layer
+  // costs a few bytes in memory, so small canvases can hold thousands of frames and big ones fewer.
+  const CELL_BUDGET = 16e6;      // pixels across all frames and layers that stay comfortable on an iPad
+  const DECODE_BUDGET = 48e6;    // raw pixels a GIF may decode to before any shrinking
+  const HEAVY_CELLS = 4e6;       // past this, warn that playback and saving may slow down
+  const maxFramesFor = (w, h, nl = 1) => Math.max(1, Math.floor(CELL_BUDGET / (w * h * nl)));
   const impDlg = $('#impDlg'), impOpts = $('#impOpts');
   let imp = null, impTimer = 0;
   async function importFile(file) {
@@ -2208,7 +2259,15 @@ function encodeGIF(w, h, palette, frames, delays) {
         fr = fr.map(f => fitResize(f, w, h, nw, nh)); w = nw; h = nh; fitted = true;
       }
     }
-    if (fr.length > 500) fr = fr.slice(0, 500);
+    const room = o.dest === 'here' ? Math.max(0, maxFramesFor(W, H, layers.length) - frames.length) : maxFramesFor(w, h);
+    if (fr.length > room) {
+      note = [note, 'Keeps the first ' + room + ' of ' + fr.length + ' frames, the most that fit comfortably at ' + w + ' × ' + h + '.'].filter(Boolean).join(' ');
+      fr = fr.slice(0, room); if (holdsOut) holdsOut = holdsOut.slice(0, room);
+    } else if (o.decodeCapped) {
+      note = [note, 'Only the first ' + fr.length + ' frames were read at this file size. A smaller copy of the GIF imports more.'].filter(Boolean).join(' ');
+    }
+    const cells = fr.length * w * h + (o.dest === 'here' ? frames.length * W * H * layers.length : 0);
+    if (cells > HEAVY_CELLS) note = [note, 'This is a big animation, so playback and saving may feel slower on older iPads.'].filter(Boolean).join(' ');
     return {w, h, frames: fr, holds: holdsOut || fr.map(() => 1), fps: fpsOut, note, error, fitted};
   }
   function dimInput(label, val, set, aria) {
@@ -2463,10 +2522,17 @@ function encodeGIF(w, h, palette, frames, delays) {
   document.addEventListener('visibilitychange', () => { if (document.hidden) { dropFloat(); saveNow(); } });
 
   // ---------- boot ----------
-  if (!load()) sample();
-  renderRail(); renderOpts(); renderPal(); paintSlots(); updUR(); renderTimeline(); renderLayers();
-  new ResizeObserver(resize).observe(stage);
-  resize();
+  (async () => {
+    const saved = await readSaved();
+    if (!load(saved)) sample();
+    booted = true;
+    renderRail(); renderOpts(); renderPal(); paintSlots(); updUR(); renderTimeline(); renderLayers();
+    new ResizeObserver(resize).observe(stage);
+    resize();
+    if (saved) saveNow(); // moves a project from the old localStorage home into IndexedDB
+    // ask the browser not to clear the project when the device runs low on space
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+  })();
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
   window.__pp = { get state() { return {W, H, px, frames, layers, layer, sel, floating, tool, pending, view, colors, undo: undoS.length, comp: compShow}; }, setTool,
     cellToClient: (x, y) => { const r = cv.getBoundingClientRect(); return {x: r.left + view.ox + (x + .5) * view.z, y: r.top + view.oy + (y + .5) * view.z}; } };
