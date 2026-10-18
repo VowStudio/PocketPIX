@@ -1,5 +1,5 @@
 // Pocket Pixel offline cache. Bump the version when you change any file.
-const CACHE = 'pocket-pixel-v3';
+const CACHE = 'pocket-pixel-v4';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 
 self.addEventListener('install', e => {
