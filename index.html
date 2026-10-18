@@ -186,6 +186,11 @@ header .spacer{flex:1}
 .linkbtn{width:44px;height:44px;border-radius:10px;border:1px solid var(--line);background:var(--panel);cursor:pointer;display:grid;place-items:center;padding:0;color:var(--muted)}
 .linkbtn svg{width:22px;height:22px;pointer-events:none}
 .linkbtn[aria-pressed="true"]{color:var(--on-accent);background:var(--accent);border-color:var(--accent)}
+.impinfo{text-align:left;overflow-wrap:anywhere}
+#impPrev{image-rendering:pixelated;max-width:100%;background:repeating-conic-gradient(var(--check-a) 0 25%,var(--check-b) 0 50%) 0 0/12px 12px;border-radius:6px}
+.impopts{display:flex;flex-direction:column;gap:10px}
+.improw{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.improw > .olabel{width:72px}
 .filebtn{position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden}
 .filebtn input{position:absolute;inset:0;opacity:0;cursor:pointer}
 .textin{min-height:48px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit;font-size:17px;padding:0 14px;-webkit-user-select:text;user-select:text}
@@ -220,6 +225,7 @@ header .spacer{flex:1}
     <button class="btn icon" id="undoBtn" title="Undo (⌘Z)" aria-label="Undo"><svg viewBox="0 0 24 24"><path d="M9 5L4 10l5 5"/><path d="M4 10h10a5 5 0 0 1 0 10h-4"/></svg></button>
     <button class="btn icon" id="redoBtn" title="Redo (⇧⌘Z)" aria-label="Redo"><svg viewBox="0 0 24 24"><path d="M15 5l5 5-5 5"/><path d="M20 10H10a5 5 0 0 0 0 10h4"/></svg></button>
     <button class="btn" id="fxBtn">Effects</button>
+    <label class="btn filebtn" id="impBtn" title="Import a PNG, JPG, GIF or project file">Import<input type="file" class="impFile" aria-label="Import a file"></label>
     <button class="btn" id="newBtn">New</button>
     <button class="btn primary" id="exportBtn">Export</button>
   </header>
@@ -306,8 +312,20 @@ header .spacer{flex:1}
     </div>
     <p class="hint" id="sizeHint">Any size from 1 to 256 pixels on each side.</p>
     <button class="btn primary" id="createBtn">Create canvas</button>
-    <label class="btn filebtn">Open a project file<input type="file" id="openFile" accept=".json,.pixel,application/json"></label>
+    <label class="btn filebtn">Import a picture or project file<input type="file" class="impFile" aria-label="Import a file"></label>
     <button class="btn" data-close>Keep drawing</button>
+  </div>
+</div>
+
+<div class="overlay" id="impDlg" hidden>
+  <div class="sheet" role="dialog" aria-labelledby="impT">
+    <h2 id="impT">Import</h2>
+    <p class="dim impinfo" id="impInfo"></p>
+    <div class="outwrap"><canvas id="impPrev" width="1" height="1"></canvas></div>
+    <div id="impOpts" class="impopts"></div>
+    <p class="hint" id="impHint"></p>
+    <button class="btn primary" id="impGo">Import</button>
+    <button class="btn" data-close>Cancel</button>
   </div>
 </div>
 
@@ -1833,7 +1851,7 @@ function encodeGIF(w, h, palette, frames, delays) {
 
   // ---------- dialogs ----------
   const newDlg = $('#newDlg'), expDlg = $('#exportDlg'), textDlg = $('#textDlg'), fxDlg = $('#fxDlg');
-  const DIALOGS = [newDlg, expDlg, textDlg, fxDlg];
+  const DIALOGS = [newDlg, expDlg, textDlg, fxDlg, $('#impDlg')];
   function closeDlg(d) { if (d === fxDlg) adjCancel(); d.hidden = true; }
   document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => closeDlg(b.closest('.overlay')));
   DIALOGS.forEach(d => d.addEventListener('click', e => { if (e.target === d) closeDlg(d); }));
@@ -1901,18 +1919,6 @@ function encodeGIF(w, h, palette, frames, delays) {
     sel = null; floating = null; pending = null; syncPx();
     view.fit = true; renderTimeline(); renderLayers(); updTimelineCtrls(); resize(); save();
   }
-  $('#openFile').addEventListener('change', e => {
-    const f = e.target.files && e.target.files[0]; e.target.value = '';
-    if (!f) return;
-    const r = new FileReader();
-    r.onload = () => {
-      const prev = snapshot();
-      let d = null; try { d = JSON.parse(r.result); } catch (_) {}
-      if (!useProject(d)) { toast("That file isn't a Pocket Pixel project"); return; }
-      record(prev); newDlg.hidden = true; view.fit = true; renderTimeline(); renderLayers(); updTimelineCtrls(); resize(); save(); toast('Project opened');
-    };
-    r.readAsText(f);
-  });
 
   // ---------- text tool ----------
   let textAt = {x: 0, y: 0}, textSize = 8, fontReady = false;
@@ -2023,6 +2029,305 @@ function encodeGIF(w, h, palette, frames, delays) {
   document.querySelectorAll('#fxScope [data-sc]').forEach(b => b.onclick = () => { adjReset(); fxScope = b.dataset.sc; renderFxScope(); });
   $('#fxBtn').onclick = () => { stopPlay(); settle(); adjReset(); renderFxScope(); fxDlg.hidden = false; };
 
+  // ---------- import: images, sprite sheets, animated GIFs and project files ----------
+  // Decoded pictures are kept as Int32Arrays: -1 is transparent, otherwise 0xRRGGBB.
+  function lzwDecode(minSize, data, npix) {
+    const out = new Uint8Array(npix), clear = 1 << minSize, eoi = clear + 1;
+    let size = minSize + 1, mask = (1 << size) - 1, next = eoi + 1, old = -1, first = 0;
+    const prefix = new Int16Array(4096), suffix = new Uint8Array(4096), stack = new Uint8Array(4097);
+    for (let i = 0; i < clear; i++) { prefix[i] = -1; suffix[i] = i; }
+    let datum = 0, bits = 0, pi = 0, op = 0;
+    while (op < npix) {
+      while (bits < size) { if (pi >= data.length) return out; datum |= data[pi++] << bits; bits += 8; }
+      let code = datum & mask; datum >>>= size; bits -= size;
+      if (code === clear) { size = minSize + 1; mask = (1 << size) - 1; next = eoi + 1; old = -1; continue; }
+      if (code === eoi) break;
+      if (old === -1) { out[op++] = suffix[code]; old = first = code; continue; }
+      const inCode = code; let sp = 0;
+      if (code >= next) { stack[sp++] = first; code = old; }
+      while (code > eoi) { stack[sp++] = suffix[code]; code = prefix[code]; }
+      first = suffix[code]; stack[sp++] = first;
+      if (next < 4096) { prefix[next] = old; suffix[next] = first; next++; if ((next & mask) === 0 && next < 4096) { size++; mask = (1 << size) - 1; } }
+      old = inCode;
+      while (sp > 0 && op < npix) out[op++] = stack[--sp];
+    }
+    return out;
+  }
+  function decodeGIF(buf) {
+    const b = new Uint8Array(buf); let p = 6;
+    const u8 = () => b[p++], u16 = () => { const v = b[p] | (b[p + 1] << 8); p += 2; return v; };
+    const readCT = n => { const t = new Int32Array(n); for (let i = 0; i < n; i++) { t[i] = (b[p] << 16) | (b[p + 1] << 8) | b[p + 2]; p += 3; } return t; };
+    const skipSub = () => { for (;;) { const n = u8(); if (!n || p >= b.length) break; p += n; } };
+    const w = u16(), h = u16(), fl = u8(); p += 2;
+    const gct = fl & 0x80 ? readCT(1 << ((fl & 7) + 1)) : null;
+    const canvas = new Int32Array(w * h).fill(-1), frames = [], delays = [];
+    let gce = {disp: 0, tr: -1, delay: 0};
+    while (p < b.length && frames.length < 500) {
+      const t = u8();
+      if (t === 0x3B) break;
+      if (t === 0x21) {
+        const label = u8();
+        if (label === 0xF9) { const sz = u8(), pf = u8(), d = u16(), ti = u8(); p += Math.max(0, sz - 4); gce = {disp: (pf >> 2) & 7, tr: pf & 1 ? ti : -1, delay: d}; }
+        skipSub(); continue;
+      }
+      if (t !== 0x2C) break;
+      const ix = u16(), iy = u16(), iw = u16(), ih = u16(), f2 = u8();
+      const ct = f2 & 0x80 ? readCT(1 << ((f2 & 7) + 1)) : gct;
+      const minCode = u8(), parts = []; let len = 0;
+      for (;;) { const n = u8(); if (!n || p >= b.length) break; parts.push(b.subarray(p, p + n)); p += n; len += n; }
+      const data = new Uint8Array(len); let o = 0; for (const c of parts) { data.set(c, o); o += c.length; }
+      const idx = lzwDecode(minCode, data, iw * ih);
+      const prev = gce.disp === 3 ? canvas.slice() : null;
+      let rows = null;
+      if (f2 & 0x40) { rows = []; for (const [s0, st] of [[0, 8], [4, 8], [2, 4], [1, 2]]) for (let y = s0; y < ih; y += st) rows.push(y); }
+      for (let r = 0; r < ih; r++) {
+        const y = iy + (rows ? rows[r] : r); if (y >= h) continue;
+        for (let x = 0; x < iw; x++) {
+          const k = idx[r * iw + x], X = ix + x;
+          if (k === gce.tr || X >= w || !ct || k >= ct.length) continue;
+          canvas[y * w + X] = ct[k];
+        }
+      }
+      frames.push(canvas.slice()); delays.push(gce.delay);
+      if (gce.disp === 2) { for (let y = iy; y < Math.min(h, iy + ih); y++) for (let x = ix; x < Math.min(w, ix + iw); x++) canvas[y * w + x] = -1; }
+      else if (prev) canvas.set(prev);
+      gce = {disp: 0, tr: -1, delay: 0};
+    }
+    if (!frames.length) throw new Error('empty');
+    return {w, h, frames, delays};
+  }
+  async function decodeImage(file) {
+    let bmp;
+    try { bmp = await createImageBitmap(file); }
+    catch (_) {
+      bmp = await new Promise((ok, bad) => { const im = new Image(), u = URL.createObjectURL(file); im.onload = () => { URL.revokeObjectURL(u); ok(im); }; im.onerror = () => { URL.revokeObjectURL(u); bad(); }; im.src = u; });
+    }
+    const w = bmp.width, h = bmp.height;
+    if (!w || !h) throw new Error('empty');
+    if (w * h > 4096 * 4096) throw new Error('huge');
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    const x = c.getContext('2d', {willReadFrequently: true}); x.drawImage(bmp, 0, 0);
+    const d = x.getImageData(0, 0, w, h).data, out = new Int32Array(w * h);
+    for (let i = 0, j = 0; i < out.length; i++, j += 4) out[i] = d[j + 3] < 128 ? -1 : (d[j] << 16) | (d[j + 1] << 8) | d[j + 2];
+    return {w, h, frames: [out], delays: [0]};
+  }
+  const gcd = (a, b) => { while (b) [a, b] = [b, a % b]; return a; };
+  // Finds how many screen pixels make up one art pixel (an 8x export comes back as 8).
+  function detectScale(fr, w, h) {
+    let g = gcd(w, h);
+    for (const f of fr) {
+      for (let y = 0; y < h && g > 1; y++) { let run = 1; for (let x = 1; x < w; x++) { if (f[y * w + x] === f[y * w + x - 1]) run++; else { g = gcd(g, run); run = 1; if (g === 1) return 1; } } g = gcd(g, run); }
+      for (let x = 0; x < w && g > 1; x++) { let run = 1; for (let y = 1; y < h; y++) { if (f[y * w + x] === f[(y - 1) * w + x]) run++; else { g = gcd(g, run); run = 1; if (g === 1) return 1; } } g = gcd(g, run); }
+    }
+    return g;
+  }
+  function shrinkBy(f, w, h, g) {
+    const nw = w / g, nh = h / g, out = new Int32Array(nw * nh);
+    for (let y = 0; y < nh; y++) for (let x = 0; x < nw; x++) out[y * nw + x] = f[y * g * w + x * g];
+    return out;
+  }
+  // Area-average resize for photos and other big pictures; mostly-transparent cells stay transparent.
+  function fitResize(f, w, h, nw, nh) {
+    const out = new Int32Array(nw * nh);
+    for (let y = 0; y < nh; y++) for (let x = 0; x < nw; x++) {
+      const x0 = Math.floor(x * w / nw), x1 = Math.max(x0 + 1, Math.floor((x + 1) * w / nw));
+      const y0 = Math.floor(y * h / nh), y1 = Math.max(y0 + 1, Math.floor((y + 1) * h / nh));
+      let r = 0, g = 0, b = 0, n = 0, t = 0;
+      for (let yy = y0; yy < y1; yy++) for (let xx = x0; xx < x1; xx++) { const v = f[yy * w + xx]; t++; if (v < 0) continue; r += v >> 16; g += (v >> 8) & 255; b += v & 255; n++; }
+      out[y * nw + x] = n * 2 < t ? -1 : (Math.round(r / n) << 16) | (Math.round(g / n) << 8) | Math.round(b / n);
+    }
+    return out;
+  }
+  const HEXC = new Map();
+  const toHex = v => { if (v < 0) return null; let s = HEXC.get(v); if (!s) { s = '#' + v.toString(16).padStart(6, '0'); HEXC.set(v, s); } return s; };
+  const isEmpty = f => { for (let i = 0; i < f.length; i++) if (f[i] >= 0) return false; return true; };
+
+  const impDlg = $('#impDlg'), impOpts = $('#impOpts');
+  let imp = null, impTimer = 0;
+  async function importFile(file) {
+    if (!file) return;
+    stopPlay(); settle();
+    DIALOGS.forEach(d => { if (d !== impDlg) d.hidden = true; });
+    try {
+      const buf = await file.arrayBuffer(), head = new Uint8Array(buf.slice(0, 16));
+      const txt = String.fromCharCode(...head);
+      if (txt.startsWith('GIF8')) {
+        const g = decodeGIF(buf);
+        imp = {name: file.name, kind: g.frames.length > 1 ? 'gif' : 'image', ...g};
+      } else if (/^\s*[\[{]/.test(txt)) {
+        let d = null; try { d = JSON.parse(new TextDecoder().decode(buf)); } catch (_) {}
+        if (!d || !(d.w >= 1) || !(d.h >= 1) || !(d.packed || d.frames || d.px)) throw new Error('json');
+        imp = {name: file.name, kind: 'project', project: d};
+      } else {
+        imp = {name: file.name, kind: 'image', ...(await decodeImage(new Blob([buf], {type: file.type || 'image/png'})))};
+      }
+    } catch (err) {
+      imp = null;
+      toast(err && err.message === 'huge' ? 'That picture is too large to import' : "Pocket Pixel can't read that file. Try a PNG, JPG, GIF or project file.");
+      return;
+    }
+    const scale = imp.kind === 'project' ? 1 : detectScale(imp.frames, imp.w, imp.h);
+    Object.assign(imp, {scale, shrink: scale > 1, dest: 'new', fit: 64});
+    const sw = imp.w / (imp.shrink ? scale : 1), sh = imp.h / (imp.shrink ? scale : 1);
+    imp.layout = imp.kind === 'image' && ((sw > sh && sw % sh === 0) || (sh > sw && sh % sw === 0)) ? 'sheet' : 'single';
+    imp.fw = Math.min(sw, sh); imp.fh = Math.min(sw, sh);
+    renderImport(); impDlg.hidden = false;
+  }
+  // Applies the chosen options and returns the frames that would be imported.
+  function importResult() {
+    const o = imp; let w = o.w, h = o.h, fr = o.frames, holdsOut = null, fpsOut = 0, note = '', error = '';
+    if (o.shrink && o.scale > 1) { fr = fr.map(f => shrinkBy(f, w, h, o.scale)); w /= o.scale; h /= o.scale; }
+    if (o.kind === 'gif') {
+      const ds = o.delays.map(d => d > 1 ? d : 10), count = {};
+      ds.forEach(d => count[d] = (count[d] || 0) + 1);
+      const base = +Object.keys(count).sort((a, b) => count[b] - count[a])[0];
+      fpsOut = clamp(Math.round(100 / base), 1, 24);
+      holdsOut = ds.map(d => clamp(Math.round(d * fpsOut / 100), 1, 8));
+      note = 'Speed ' + fpsOut + ' fps, taken from the GIF timing.';
+    }
+    if (o.layout === 'sheet' && o.kind === 'image') {
+      const fw = o.fw, fh = o.fh;
+      if (!(fw >= 1 && fh >= 1) || fw > w || fh > h) error = 'Frame size must fit inside the ' + w + ' × ' + h + ' sheet.';
+      else {
+        const cols = Math.floor(w / fw), rows = Math.floor(h / fh), src = fr[0], out = [];
+        for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+          const f = new Int32Array(fw * fh);
+          for (let y = 0; y < fh; y++) for (let x = 0; x < fw; x++) f[y * fw + x] = src[(r * fh + y) * w + c * fw + x];
+          out.push(f);
+        }
+        while (out.length > 1 && isEmpty(out[out.length - 1])) out.pop();
+        fr = out; w = fw; h = fh;
+        note = 'Splits into a ' + cols + ' × ' + rows + ' grid of frames' + (w * cols < o.w / (o.shrink ? o.scale : 1) || h * rows < o.h / (o.shrink ? o.scale : 1) ? ', leaving out the leftover edge.' : '.');
+      }
+    }
+    let fitted = false;
+    if (!error && Math.max(w, h) > 256) {
+      if (o.layout === 'sheet' && o.kind === 'image') error = 'Each frame can be at most 256 × 256 pixels.';
+      else {
+        const k = o.fit / Math.max(w, h), nw = Math.max(1, Math.round(w * k)), nh = Math.max(1, Math.round(h * k));
+        fr = fr.map(f => fitResize(f, w, h, nw, nh)); w = nw; h = nh; fitted = true;
+      }
+    }
+    if (fr.length > 500) fr = fr.slice(0, 500);
+    return {w, h, frames: fr, holds: holdsOut || fr.map(() => 1), fps: fpsOut, note, error, fitted};
+  }
+  function dimInput(label, val, set, aria) {
+    const wrap = el('label', 'dimfield'), cap = el('span'); cap.textContent = label;
+    const st = el('span', 'stepper'), minus = el('button', '', '−'), inp = el('input'), plus = el('button', '', '+');
+    minus.type = plus.type = 'button'; minus.setAttribute('aria-label', 'Smaller ' + aria); plus.setAttribute('aria-label', 'Larger ' + aria);
+    inp.type = 'text'; inp.inputMode = 'numeric'; inp.maxLength = 4; inp.value = val; inp.setAttribute('aria-label', aria);
+    const apply = v => { v = parseInt(v, 10); if (v >= 1 && v <= 4096) { set(v); renderImport(true); } };
+    minus.onclick = () => { inp.value = Math.max(1, (+inp.value || 1) - 1); apply(inp.value); };
+    plus.onclick = () => { inp.value = (+inp.value || 0) + 1; apply(inp.value); };
+    inp.addEventListener('input', () => { inp.value = inp.value.replace(/[^0-9]/g, ''); apply(inp.value); });
+    inp.addEventListener('keydown', e => e.stopPropagation());
+    st.append(minus, inp, plus); wrap.append(cap, st); return wrap;
+  }
+  function renderImport(keepOpts) {
+    const o = imp; if (!o) return;
+    clearInterval(impTimer);
+    const go = $('#impGo'), info = $('#impInfo'), hint = $('#impHint'), prev = $('#impPrev');
+    if (o.kind === 'project') {
+      const d = o.project, nf = d.packed ? (d.packed.cels || []).length : (d.frames || [1]).length, nl = Array.isArray(d.layers) ? d.layers.length : 1;
+      info.textContent = o.name + ' · Pocket Pixel project · ' + d.w + ' × ' + d.h + ' · ' + nf + ' frame' + (nf > 1 ? 's' : '') + ' · ' + nl + ' layer' + (nl > 1 ? 's' : '');
+      prev.hidden = true; impOpts.replaceChildren();
+      hint.textContent = 'Opening it replaces your current canvas. Undo brings your current work back.';
+      go.disabled = false; go.textContent = 'Open project'; return;
+    }
+    prev.hidden = false;
+    const typeName = o.kind === 'gif' ? 'animated GIF · ' + o.frames.length + ' frames' : 'image';
+    info.textContent = o.name + ' · ' + o.w + ' × ' + o.h + ' ' + typeName;
+    if (!keepOpts) {
+      const parts = [];
+      const row = (label, ...kids) => { const r = el('div', 'improw'); const l = el('span', 'olabel'); l.textContent = label; r.append(l, ...kids); parts.push(r); };
+      if (o.scale > 1) {
+        const c = toggleChip('Undo ' + o.scale + '× scaling', o.shrink, v => { o.shrink = v; const s = v ? o.scale : 1 / o.scale; o.fw = Math.max(1, Math.round(o.fw / s)); o.fh = Math.max(1, Math.round(o.fh / s)); renderImport(); }, 'Each art pixel was drawn as ' + o.scale + ' × ' + o.scale + ' screen pixels');
+        row('Pixels', c);
+      }
+      if (o.kind === 'image') row('Layout', seg([['single', 'Single image'], ['sheet', 'Sprite sheet']], o.layout, v => { o.layout = v; renderImport(); }));
+      if (o.kind === 'image' && o.layout === 'sheet') row('Frame', dimInput('Width', o.fw, v => o.fw = v, 'frame width'), dimInput('Height', o.fh, v => o.fh = v, 'frame height'));
+      const r0 = importResult();
+      if (r0.fitted || (Math.max(o.w, o.h) / (o.shrink ? o.scale : 1) > 256 && o.layout !== 'sheet')) row('Resize to', seg([[32, '32'], [64, '64'], [128, '128'], [256, '256']], o.fit, v => { o.fit = v; renderImport(true); }), Object.assign(el('span', 'ohint'), {textContent: 'px on the long side'}));
+      row('Put it in', seg([['new', 'New canvas'], ['here', 'This canvas']], o.dest, v => { o.dest = v; renderImport(true); }));
+      impOpts.replaceChildren(...parts);
+    }
+    const r = importResult(); o.res = r;
+    const multi = r.frames.length > 1;
+    const notes = [r.note, r.fitted ? 'Resized to ' + r.w + ' × ' + r.h + '.' : ''].filter(Boolean);
+    if (r.error) { hint.textContent = r.error; go.disabled = true; go.textContent = 'Import'; }
+    else {
+      go.disabled = false;
+      if (o.dest === 'new') {
+        go.textContent = 'Import as a new ' + r.w + ' × ' + r.h + ' canvas' + (multi ? ' (' + r.frames.length + ' frames)' : '');
+        notes.push('Undo brings your current work back.');
+      } else if (multi) {
+        go.textContent = 'Add ' + r.frames.length + ' frames after frame ' + (cur + 1);
+        notes.push('Goes on ' + layers[layer].name + (r.w > W || r.h > H ? '; parts outside your ' + W + ' × ' + H + ' canvas are cut off.' : ', lined up with the top-left corner.'));
+      } else {
+        go.textContent = 'Paste into this canvas';
+        notes.push('Arrives as a selection on ' + layers[layer].name + ' that you can move, rotate and drop.');
+      }
+      hint.textContent = notes.join(' ');
+    }
+    // animated preview of exactly what will be imported
+    const fr = r.frames; if (!fr.length) return;
+    const s = Math.max(1, Math.min(16, Math.floor(Math.min(380 / r.w, 220 / r.h))));
+    prev.width = r.w * s; prev.height = r.h * s;
+    const x = prev.getContext('2d');
+    let k = 0;
+    const draw = () => {
+      x.clearRect(0, 0, prev.width, prev.height);
+      const f = fr[k % fr.length];
+      for (let i = 0; i < f.length; i++) { const v = f[i]; if (v < 0) continue; x.fillStyle = toHex(v); x.fillRect((i % r.w) * s, Math.floor(i / r.w) * s, s, s); }
+      k++;
+    };
+    draw();
+    if (multi) impTimer = setInterval(() => { if (impDlg.hidden) { clearInterval(impTimer); return; } draw(); }, 1000 / (r.fps || fps));
+  }
+  $('#impGo').onclick = () => {
+    const o = imp; if (!o) return;
+    if (o.kind === 'project') {
+      const prevSnap = snapshot();
+      if (!useProject(o.project)) { toast("That file isn't a Pocket Pixel project"); return; }
+      record(prevSnap); impDlg.hidden = true; view.fit = true; renderTimeline(); renderLayers(); updTimelineCtrls(); resize(); save(); toast('Project opened · undo to go back');
+      return;
+    }
+    const r = o.res || importResult(); if (r.error || !r.frames.length) return;
+    const hexF = r.frames.map(f => Array.from(f, toHex));
+    if (o.dest === 'new') {
+      record(); impDlg.hidden = true;
+      resetDoc(r.w, r.h, hexF.map(f => [f]), r.holds.slice(), r.fps);
+      toast('Imported ' + (hexF.length > 1 ? hexF.length + ' frames' : o.name) + ' · undo to go back');
+    } else if (hexF.length === 1) {
+      impDlg.hidden = true;
+      placeFloating({x: Math.floor((W - r.w) / 2), y: Math.floor((H - r.h) / 2), w: r.w, h: r.h, data: hexF[0], mask: new Uint8Array(r.w * r.h).fill(1)}, 'Drag it into place, then tap Drop');
+    } else {
+      if (!editable()) return;
+      impDlg.hidden = true;
+      frameOp(() => {
+        const add = hexF.map(f => layers.map((_, l) => {
+          const a = blank(W, H); if (l !== layer) return a;
+          for (let y = 0; y < Math.min(r.h, H); y++) for (let x = 0; x < Math.min(r.w, W); x++) a[y * W + x] = f[y * r.w + x];
+          return a;
+        }));
+        frames.splice(cur + 1, 0, ...add); holds.splice(cur + 1, 0, ...r.holds); cur++;
+      });
+      toast('Added ' + hexF.length + ' frames · undo to remove them');
+    }
+  };
+  document.querySelectorAll('.impFile').forEach(inp => inp.addEventListener('change', e => {
+    const f = e.target.files && e.target.files[0]; e.target.value = ''; importFile(f);
+  }));
+  // drag a file onto the app, or paste a copied picture
+  document.addEventListener('dragover', e => { if (e.dataTransfer && [...e.dataTransfer.types].includes('Files')) e.preventDefault(); });
+  document.addEventListener('drop', e => { const f = e.dataTransfer && e.dataTransfer.files[0]; if (f) { e.preventDefault(); importFile(f); } });
+  document.addEventListener('paste', e => {
+    if (e.target && e.target.tagName === 'INPUT') return;
+    const items = e.clipboardData ? [...e.clipboardData.items] : [];
+    const it = items.find(i => i.kind === 'file');
+    if (it) { e.preventDefault(); importFile(it.getAsFile()); }
+  });
+
   // ---------- export ----------
   let expScale = 8, expFmt = 'gif', expJob = 0, expFile = null;
   if (!STANDALONE) { $('#projFmt').hidden = true; $('#shareBtn').hidden = true; }
@@ -2065,7 +2370,7 @@ function encodeGIF(w, h, palette, frames, delays) {
     const isProj = expFmt === 'project';
     $('#scales').hidden = isProj; $('#outwrap').hidden = isProj;
     $('#expHint').textContent = isProj
-      ? 'Keeps every frame, layer, hold, and speed setting. Save it to Files, then use New › Open a project file to keep working, even on another device.'
+      ? 'Keeps every frame, layer, hold, and speed setting. Save it to Files, then tap Import to keep working, even on another device.'
       : (STANDALONE ? 'Tap Save or share, then choose Save Image or Save to Files. Hidden layers are left out; transparent areas stay transparent.'
                     : 'Touch and hold the image, then choose Save to Photos or Share. Hidden layers are left out; transparent areas stay transparent.');
     expFile = null; $('#shareBtn').disabled = true;
