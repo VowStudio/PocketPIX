@@ -534,7 +534,7 @@ function encodeGIF(w, h, palette, frames, delays) {
   let layers = [{name: 'Layer 1', visible: true, locked: false}], layer = 0;
   let colors = {main: PAL[4], second: PAL[3]}, slot = 'main', recent = [];
   let tool = 'pencil', prevTool = 'pencil';
-  let brush = {size: 1, shape: 'square'}, pp = true, density = 4, contig = true, gradMode = 'dither', selMode = 'replace', spiralTurns = 3, spiralDir = 1;
+  let brush = {size: 1, shape: 'square'}, pp = true, density = 4, contig = true, gradMode = 'dither', selMode = 'replace', spiralTurns = 3, spiralDir = 1, rotSnap = 0;
   let mirrorH = false, mirrorV = false, grid = true;
   let sel = null, floating = null, clip = null, pending = null, compShow = null;
   let undoS = [], redoS = [], stroke = null, hover = null, gesture = null;
@@ -650,12 +650,13 @@ function encodeGIF(w, h, palette, frames, delays) {
       if (typeof p.grid === 'boolean') grid = p.grid;
       if (p.spiralTurns >= 1 && p.spiralTurns <= 12) spiralTurns = p.spiralTurns | 0;
       if (p.spiralDir === -1) spiralDir = -1;
+      if ([0, 15, 45, 90].includes(p.rotSnap)) rotSnap = p.rotSnap;
       return true;
     } catch (e) { return false; }
   }
   let saveT;
   const saveNow = () => { try { localStorage.setItem(SK, JSON.stringify({...projectData(), onion, colors, recent,
-      prefs: {brush, pp, density, contig, gradMode, grid, spiralTurns, spiralDir}})); } catch (e) {} };
+      prefs: {brush, pp, density, contig, gradMode, grid, spiralTurns, spiralDir, rotSnap}})); } catch (e) {} };
   function save() { clearTimeout(saveT); saveT = setTimeout(saveNow, 300); }
 
   // ---------- view ----------
@@ -782,6 +783,23 @@ function encodeGIF(w, h, palette, frames, delays) {
       if (floating) {
         const f = floating;
         outline((x, y) => { const lx = x - f.x, ly = y - f.y; return lx >= 0 && ly >= 0 && lx < f.w && ly < f.h && f.mask[ly * f.w + lx] === 1; }, f.x, f.y, f.w, f.h);
+        if (tool === 'move') {
+          const hd = rotHandle(), active = stroke && stroke.kind === 'rotate';
+          ctx.save(); ctx.setLineDash([]);
+          ctx.beginPath(); ctx.moveTo(hd.cx, hd.cy); ctx.lineTo(hd.x, hd.y);
+          ctx.lineWidth = 3; ctx.strokeStyle = '#16141d'; ctx.stroke(); ctx.lineWidth = 1.5; ctx.strokeStyle = '#ffcf5c'; ctx.stroke();
+          ctx.beginPath(); ctx.arc(hd.cx, hd.cy, 3.5, 0, Math.PI * 2); ctx.fillStyle = '#ffcf5c'; ctx.fill(); ctx.stroke();
+          ctx.beginPath(); ctx.arc(hd.x, hd.y, active ? 13 : 11, 0, Math.PI * 2);
+          ctx.fillStyle = '#ffcf5c'; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = '#16141d'; ctx.stroke();
+          ctx.beginPath(); ctx.arc(hd.x, hd.y, 5.5, -Math.PI * .85, Math.PI * .55); ctx.lineWidth = 1.8; ctx.stroke();
+          if (active) {
+            const t = fmtAngle(f.angle); ctx.font = '700 13px ' + getComputedStyle(document.body).fontFamily;
+            const tw = ctx.measureText(t).width + 14, tx = hd.x + 20, ty = hd.y - 12;
+            ctx.fillStyle = '#16141d'; ctx.beginPath(); ctx.roundRect ? ctx.roundRect(tx, ty, tw, 24, 7) : ctx.rect(tx, ty, tw, 24); ctx.fill();
+            ctx.fillStyle = '#ffcf5c'; ctx.fillText(t, tx + 7, ty + 16.5);
+          }
+          ctx.restore();
+        }
       } else if (stroke && stroke.kind === 'selDrag' && stroke.preview) outline(maskGet(stroke.preview), 0, 0, W, H);
       else if (sel) outline(maskGet(sel), 0, 0, W, H);
       if (stroke && stroke.kind === 'path') pathOverlay(stroke.path, false);
@@ -1046,6 +1064,7 @@ function encodeGIF(w, h, palette, frames, delays) {
     const nf = px.slice();
     for (let y = 0; y < g.h; y++) for (let x = 0; x < g.w; x++) if (g.mask[y * g.w + x]) nf[(g.y + y) * W + g.x + x] = null;
     setCel(nf); floating = g; sel = null;
+    if (tool === 'move') renderOpts();
     return true;
   }
   function dropFloat() {
@@ -1059,37 +1078,108 @@ function encodeGIF(w, h, palette, frames, delays) {
       m[ty * W + tx] = 1;
     }
     setCel(nf); sel = m.some(v => v) ? m : null;
+    if (tool === 'move') renderOpts();
     save();
   }
   const ensureFloat = () => !!floating || lift();
+  // Rotation keeps the untouched source pixels (f.base) and redraws from them at every angle,
+  // so turning a selection back and forth never degrades it.
+  function ensureBase(f) {
+    if (f.base) return;
+    f.base = {w: f.w, h: f.h, data: f.data, mask: f.mask};
+    f.angle = 0; f.cx = f.x + f.w / 2; f.cy = f.y + f.h / 2;
+  }
+  // RotSprite-style upscale: Scale2x (EPX) keeps diagonal edges smooth before sampling at an angle.
+  function scale2x(v, w, h) {
+    const W2 = w * 2, out = new Array(W2 * h * 2);
+    const at = (x, y) => v[clamp(y, 0, h - 1) * w + clamp(x, 0, w - 1)];
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const P = at(x, y), A = at(x, y - 1), B = at(x + 1, y), C = at(x - 1, y), D = at(x, y + 1);
+      let p1 = P, p2 = P, p3 = P, p4 = P;
+      if (C === A && C !== D && A !== B) p1 = A;
+      if (A === B && A !== C && B !== D) p2 = B;
+      if (D === C && D !== B && C !== A) p3 = C;
+      if (B === D && B !== A && D !== C) p4 = D;
+      const o = y * 2 * W2 + x * 2;
+      out[o] = p1; out[o + 1] = p2; out[o + W2] = p3; out[o + W2 + 1] = p4;
+    }
+    return out;
+  }
+  function bigBase(b) {
+    if (b.big) return b.big;
+    let v = b.data.map((c, i) => b.mask[i] ? (c || '~') : null), w = b.w, h = b.h, k = 1;
+    const passes = w * h <= 96 * 96 ? 3 : w * h <= 192 * 192 ? 2 : 0;
+    for (let i = 0; i < passes; i++) { v = scale2x(v, w, h); w *= 2; h *= 2; k *= 2; }
+    return b.big = {v, w, h, k};
+  }
+  function rasterize(f) {
+    const b = f.base, ang = ((f.angle % 360) + 360) % 360, right = ang % 90 === 0;
+    const r = ang * Math.PI / 180;
+    let co = Math.cos(r), si = Math.sin(r);
+    if (right) { co = Math.round(co); si = Math.round(si); }
+    const ex = Math.abs(co) * b.w / 2 + Math.abs(si) * b.h / 2, ey = Math.abs(si) * b.w / 2 + Math.abs(co) * b.h / 2;
+    const nw = Math.max(1, Math.round(ex * 2)), nh = Math.max(1, Math.round(ey * 2));
+    const x0 = Math.round(f.cx - nw / 2), y0 = Math.round(f.cy - nh / 2);
+    const big = right ? null : bigBase(b);
+    const data = new Array(nw * nh).fill(null), mask = new Uint8Array(nw * nh);
+    for (let j = 0; j < nh; j++) for (let i = 0; i < nw; i++) {
+      const rx = x0 + i + .5 - f.cx, ry = y0 + j + .5 - f.cy;
+      const u = rx * co + ry * si + b.w / 2, v = -rx * si + ry * co + b.h / 2;
+      let val;
+      if (right) {
+        const sx = Math.floor(u + 1e-6), sy = Math.floor(v + 1e-6);
+        if (sx < 0 || sy < 0 || sx >= b.w || sy >= b.h) continue;
+        const k = sy * b.w + sx; if (!b.mask[k]) continue;
+        val = b.data[k] || '~';
+      } else {
+        const sx = Math.floor(u * big.k), sy = Math.floor(v * big.k);
+        if (sx < 0 || sy < 0 || sx >= big.w || sy >= big.h) continue;
+        val = big.v[sy * big.w + sx]; if (val == null) continue;
+      }
+      mask[j * nw + i] = 1; data[j * nw + i] = val === '~' ? null : val;
+    }
+    f.x = x0; f.y = y0; f.w = nw; f.h = nh; f.data = data; f.mask = mask;
+  }
+  const normAngle = a => { a = ((a % 360) + 540) % 360 - 180; return a === -180 ? 180 : a; };
+  function setAngle(a) {
+    if (!ensureFloat()) return;
+    const f = floating; ensureBase(f);
+    f.angle = normAngle(Math.round(a * 10) / 10); rasterize(f);
+    updAngleUI(); afterTransform();
+  }
+  function rotateBy(d) { if (!ensureFloat()) return; ensureBase(floating); setAngle(floating.angle + d); }
   function flipFloat(horizontal) {
     if (!ensureFloat()) return;
-    const f = floating, nd = new Array(f.w * f.h), nm = new Uint8Array(f.w * f.h);
-    for (let y = 0; y < f.h; y++) for (let x = 0; x < f.w; x++) {
-      const s = y * f.w + x, d = horizontal ? y * f.w + (f.w - 1 - x) : (f.h - 1 - y) * f.w + x;
-      nd[d] = f.data[s]; nm[d] = f.mask[s];
+    const f = floating; ensureBase(f);
+    const b = f.base, nd = new Array(b.w * b.h), nm = new Uint8Array(b.w * b.h);
+    for (let y = 0; y < b.h; y++) for (let x = 0; x < b.w; x++) {
+      const s = y * b.w + x, d = horizontal ? y * b.w + (b.w - 1 - x) : (b.h - 1 - y) * b.w + x;
+      nd[d] = b.data[s]; nm[d] = b.mask[s];
     }
-    f.data = nd; f.mask = nm; afterTransform();
+    // mirroring a turned selection = mirror the source, then turn the other way
+    f.base = {w: b.w, h: b.h, data: nd, mask: nm}; f.angle = normAngle(-f.angle); rasterize(f);
+    updAngleUI(); afterTransform();
   }
-  function rotateFloat() {
-    if (!ensureFloat()) return;
-    const f = floating, nw = f.h, nh = f.w, nd = new Array(nw * nh), nm = new Uint8Array(nw * nh);
-    for (let y = 0; y < f.h; y++) for (let x = 0; x < f.w; x++) {
-      const s = y * f.w + x, d = x * nw + (f.h - 1 - y);
-      nd[d] = f.data[s]; nm[d] = f.mask[s];
-    }
-    f.x = Math.round(f.x + f.w / 2 - nw / 2); f.y = Math.round(f.y + f.h / 2 - nh / 2);
-    f.w = nw; f.h = nh; f.data = nd; f.mask = nm; afterTransform();
+  function shiftFloat(dx, dy) { const f = floating; f.x += dx; f.y += dy; if (f.base) { f.cx += dx; f.cy += dy; } }
+  function afterTransform() { if (tool !== 'move') setTool('move'); else { renderOpts(); render(); } }
+  function rotHandle() {
+    // screen position (css px, relative to the canvas) of the round rotate handle
+    const f = floating; if (!f) return null;
+    const z = view.z, cx = (f.base ? f.cx : f.x + f.w / 2), cy = (f.base ? f.cy : f.y + f.h / 2);
+    const a = (f.base ? f.angle : 0) * Math.PI / 180, reach = ((f.base ? f.base.h : f.h) / 2) * z + 34;
+    const X = view.ox + cx * z, Y = view.oy + cy * z;
+    return {cx: X, cy: Y, x: X + Math.sin(a) * reach, y: Y - Math.cos(a) * reach};
   }
-  function afterTransform() { if (tool !== 'move') setTool('move'); else render(); }
+  function updAngleUI() { const o = $('#angleVal'); if (o && floating) o.textContent = fmtAngle(floating.base ? floating.angle : 0); }
+  const fmtAngle = a => (Math.round(a * 10) / 10) + '°';
   function copySel(quiet) {
-    if (floating) clip = {...floating, data: floating.data.slice(), mask: floating.mask.slice()};
+    if (floating) clip = {x: floating.x, y: floating.y, w: floating.w, h: floating.h, data: floating.data.slice(), mask: floating.mask.slice()};
     else clip = grab(sel);
     if (!quiet) toast(sel || floating ? 'Copied selection' : 'Copied whole layer');
     render();
   }
   function deleteSel() {
-    if (floating) { floating = null; sel = null; render(); save(); return; }
+    if (floating) { floating = null; sel = null; if (tool === 'move') renderOpts(); render(); save(); return; }
     if (!sel || !editable()) return;
     record();
     const nf = px.slice(); for (let i = 0; i < nf.length; i++) if (sel[i]) nf[i] = null;
@@ -1108,7 +1198,7 @@ function encodeGIF(w, h, palette, frames, delays) {
   }
   function pasteClip() {
     if (!clip) { toast('Copy something first'); return; }
-    placeFloating({...clip, data: clip.data.slice(), mask: clip.mask.slice(), x: clamp(clip.x, 1 - clip.w, W - 1), y: clamp(clip.y, 1 - clip.h, H - 1)}, 'Pasted · drag to place it');
+    placeFloating({w: clip.w, h: clip.h, data: clip.data.slice(), mask: clip.mask.slice(), x: clamp(clip.x, 1 - clip.w, W - 1), y: clamp(clip.y, 1 - clip.h, H - 1)}, 'Pasted · drag to place it');
   }
   function selectAll() { settle(); record(); sel = new Uint8Array(W * H).fill(1); render(); }
   function invertSel() { settle(); record(); sel = sel ? sel.map(v => 1 - v) : new Uint8Array(W * H).fill(1); if (!sel.some(v => v)) sel = null; render(); }
@@ -1189,8 +1279,17 @@ function encodeGIF(w, h, palette, frames, delays) {
     base.before = px; base.prevSel = sel;
     if (tool === 'text') { openText(inB(p) ? p : {x: 0, y: 0}); return; }
     if (tool === 'move') {
+      if (floating) {
+        const hd = rotHandle(), r = cv.getBoundingClientRect();
+        if (Math.hypot(e.clientX - r.left - hd.x, e.clientY - r.top - hd.y) <= 26) {
+          ensureBase(floating);
+          const a0 = Math.atan2(e.clientX - r.left - hd.cx, -(e.clientY - r.top - hd.cy));
+          stroke = {...base, kind: 'rotate', a0, ang0: floating.angle, base0: floating.base, snapshot: {...floating}}; render(); return;
+        }
+      }
       if (!floating && !lift()) { toast('Nothing to move'); return; }
-      stroke = {...base, kind: 'move', fx: floating.x, fy: floating.y}; render(); return;
+      const f = floating;
+      stroke = {...base, kind: 'move', fx: f.x, fy: f.y, fcx: f.cx, fcy: f.cy}; renderOpts(); render(); return;
     }
     if (tool === 'polygon' || tool === 'polyLasso') { stroke = {...base, kind: 'tap'}; return; }
     if (tool === 'curve') {
@@ -1225,6 +1324,15 @@ function encodeGIF(w, h, palette, frames, delays) {
     }
   }
   function moveStroke(evs) {
+    if (stroke.kind === 'rotate') {
+      const ev = evs[evs.length - 1], r = cv.getBoundingClientRect(), hd = rotHandle();
+      const a = Math.atan2(ev.clientX - r.left - hd.cx, -(ev.clientY - r.top - hd.cy));
+      let ang = stroke.ang0 + (a - stroke.a0) * 180 / Math.PI;
+      if (rotSnap) ang = Math.round(ang / rotSnap) * rotSnap;
+      ang = normAngle(Math.round(ang * 10) / 10);
+      if (ang !== floating.angle) { floating.angle = ang; rasterize(floating); updAngleUI(); }
+      render(); return;
+    }
     for (const ev of evs) {
       if (stroke.kind === 'pan') { view.ox = stroke.ox + ev.clientX - stroke.sx; view.oy = stroke.oy + ev.clientY - stroke.sy; view.fit = false; continue; }
       const p = cellAt(ev);
@@ -1232,7 +1340,7 @@ function encodeGIF(w, h, palette, frames, delays) {
       const k = stroke.kind;
       if (k === 'free') { const l = stroke.last; plotLine(l, p, (x, y) => { if (x !== l.x || y !== l.y) applyFree(x, y); }); }
       else if (k === 'shape') { setCel(stroke.before.slice()); drawShape(stroke.start, p); }
-      else if (k === 'move') { floating.x = stroke.fx + p.x - stroke.start.x; floating.y = stroke.fy + p.y - stroke.start.y; }
+      else if (k === 'move') { shiftFloat(stroke.fx + p.x - stroke.start.x - floating.x, stroke.fy + p.y - stroke.start.y - floating.y); }
       else if (k === 'selDrag') {
         const a = stroke.start;
         stroke.preview = maskFrom(cb => tool === 'marquee' ? rectCells(a, p, true, cb) : ellipseCells(a, p, true, cb));
@@ -1249,7 +1357,7 @@ function encodeGIF(w, h, palette, frames, delays) {
     stroke = null; clearInterval(sprayTimer);
     const k = s.kind;
     if (k === 'pan') { cv.style.cursor = 'grab'; render(); return; }
-    if (k === 'move') { render(); updUR(); return; }
+    if (k === 'move' || k === 'rotate') { render(); updUR(); return; }
     if (k === 'free' || k === 'shape' || k === 'once') { commitFrom(s.before, s.prevSel); render(); return; }
     if (k === 'selDrag') {
       const moved = s.start.x !== s.last.x || s.start.y !== s.last.y;
@@ -1289,7 +1397,8 @@ function encodeGIF(w, h, palette, frames, delays) {
     if (!stroke) return;
     clearInterval(sprayTimer);
     const s = stroke; stroke = null;
-    if (s.kind === 'move') { floating.x = s.fx; floating.y = s.fy; }
+    if (s.kind === 'move') shiftFloat(s.fx - floating.x, s.fy - floating.y);
+    else if (s.kind === 'rotate') { floating.angle = s.ang0; rasterize(floating); updAngleUI(); }
     else if (s.kind === 'bend') { setCel(pending.before.slice()); plotLine(pending.a, pending.b, (x, y) => stamp(x, y, colors.main)); }
     else if (s.kind !== 'pan' && s.kind !== 'selDrag' && s.kind !== 'tap' && s.kind !== 'path') setCel(s.before);
     render();
@@ -1334,7 +1443,7 @@ function encodeGIF(w, h, palette, frames, delays) {
     if (stroke && e.pointerId === stroke.id) {
       let evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
       if (!evs.length) evs = [e];
-      if (stroke.kind === 'pan') evs = [e];
+      if (stroke.kind === 'pan' || stroke.kind === 'rotate') evs = [e];
       moveStroke(evs); return;
     }
     if (e.pointerType !== 'touch' && !playing) {
@@ -1474,7 +1583,23 @@ function encodeGIF(w, h, palette, frames, delays) {
       o.push(fin, can, Hn(n ? 'Tap the first point to close' : 'Tap to place corners'));
     }
     if (tool === 'curve') o.push(Hn(pending ? 'Now drag to bend the curve' : 'Drag a line, then drag again to bend it'));
-    if (tool === 'move') o.push(Hn(floating ? 'Drag to place · Drop when done' : 'Drag to move the selection, or the whole layer'));
+    if (tool === 'move') {
+      if (floating) {
+        const ang = floating.base ? floating.angle : 0;
+        const aw = el('div', 'stepper'); aw.setAttribute('role', 'group'); aw.setAttribute('aria-label', 'Angle');
+        const am = el('button', '', '−'), av = el('output', ''), ap = el('button', '', '+');
+        av.id = 'angleVal'; av.textContent = fmtAngle(ang); av.style.minWidth = '52px';
+        const step = () => rotSnap || 1;
+        am.setAttribute('aria-label', 'Turn left'); ap.setAttribute('aria-label', 'Turn right');
+        am.onclick = () => { ensureBase(floating); setAngle(rotSnap ? Math.round((floating.angle - step()) / step()) * step() : floating.angle - 1); };
+        ap.onclick = () => { ensureBase(floating); setAngle(rotSnap ? Math.round((floating.angle + step()) / step()) * step() : floating.angle + 1); };
+        aw.append(am, av, ap);
+        const q = (label, fn, title) => { const b = el('button', 'chip', label); b.title = title; b.onclick = fn; return b; };
+        o.push(L('Angle'), aw, q('−90°', () => rotateBy(-90), 'Turn a quarter left'), q('+90°', () => rotateBy(90), 'Turn a quarter right'), q('0°', () => setAngle(0), 'Back to the original angle'),
+          L('Snap'), seg([[0, 'Off'], [15, '15°'], [45, '45°'], [90, '90°']], rotSnap, v => rotSnap = v),
+          Hn('Drag the round handle to rotate · Drop when done'));
+      } else o.push(Hn('Drag to move the selection, or the whole layer'));
+    }
     if (tool === 'lasso') o.push(Hn('Draw around what you want to select'));
     if (tool === 'contour') o.push(Hn('Draw an outline and it fills in'));
     if (tool === 'spiral') o.push(L('Turns'), stepper(spiralTurns, 1, 12, v => spiralTurns = v, 'Spiral turns'),
@@ -1508,7 +1633,7 @@ function encodeGIF(w, h, palette, frames, delays) {
     if (floating) items.push(B('check', 'Drop', () => { dropFloat(); render(); updUR(); }, 'go'));
     if (has) items.push(B('copy', 'Copy', () => copySel()), B('cut', 'Cut', cutSel));
     const pb = B('paste', 'Paste', pasteClip); pb.disabled = !clip; items.push(pb);
-    if (has) items.push(B('trash', 'Delete', () => { deleteSel(); }), B('flipH', 'Flip H', () => flipFloat(true)), B('flipV', 'Flip V', () => flipFloat(false)), B('rotate', 'Rotate', rotateFloat));
+    if (has) items.push(B('trash', 'Delete', () => { deleteSel(); }), B('flipH', 'Flip H', () => flipFloat(true)), B('flipV', 'Flip V', () => flipFloat(false)), B('rotate', 'Rotate', () => { if (!ensureFloat()) return; ensureBase(floating); afterTransform(); toast('Drag the round handle to rotate'); }));
     items.push(B('selectAll', 'All', selectAll));
     if (has) items.push(B('invert', 'Invert', invertSel), B('deselect', 'Deselect', deselect));
     selbar.replaceChildren(...items);
